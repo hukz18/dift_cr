@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import re
 
-def dataset_walkthrough(img_size, ensemble_size, visualize=False):
+def dataset_walkthrough(dift, img_size, ensemble_size, exp_name, average_pts=True, visualize=False):
     base_dir, gt_dir = 'eval_all/egocentric', 'eval_all/GT'
     total_dists = {}
     for action in (pbar_a := tqdm(os.listdir(base_dir))):
@@ -39,13 +39,14 @@ def dataset_walkthrough(img_size, ensemble_size, visualize=False):
                             lines = f.readlines()
                             src_points = [list(map(float, line.rstrip().split(','))) for line in lines if re.match(r'^\d+.\d+,\d+.\d+$', line.rstrip())]
                 prompts = [f'a photo of a {src_object}', f'a photo of {trg_object}']
-                trg_points, cor_maps = get_cor_pairs(dift, src_image, trg_image, src_points, prompts[0], prompts[1], img_size, ensemble_size, average_pts=True, return_cos_maps=visualize)
-                trg_dist = [nearest_distance_to_mask_contour(trg_mask, trg_point[0], trg_point[1]) for trg_point in trg_points]
+                trg_points, cor_maps = get_cor_pairs(dift, src_image, trg_image, src_points, prompts[0], prompts[1], img_size, ensemble_size, average_pts, return_cos_maps=visualize)
+                trg_point = np.mean(trg_points, axis=0)
+                trg_dist = nearest_distance_to_mask_contour(trg_mask, trg_point[0], trg_point[1])
                 total_dists[action][trg_object].append(trg_dist)
                 if visualize:
                     imglist = [Image.open(file).convert('RGB') for file in [src_image, trg_image]]
-                    os.makedirs(f'results/{action}/{trg_object}', exist_ok=True)
-                    plot_img_pairs(imglist, src_points, trg_points, cor_maps, trg_mask, f'results/{action}/{trg_object}/{instance}.png')
+                    os.makedirs(f'results/{exp_name}/{action}/{trg_object}', exist_ok=True)
+                    plot_img_pairs(imglist, src_points, trg_points, cor_maps, trg_mask, f'results/{exp_name}/{action}/{trg_object}/{instance}.png')
     return total_dists
 
 
@@ -56,9 +57,9 @@ def analyze_dists(total_dists):
         for trg_object in total_dists[action]:
             all_dists += total_dists[action][trg_object]
             action_dists += total_dists[action][trg_object]
-            print(f'{action} {trg_object}: {np.array(total_dists[action][trg_object]).mean()}')
-        print(f'==={action} mean===: {np.mean(action_dists)}')
-    print(f'===ALL DIST===: {np.mean(all_dists)}')
+            print(f'{trg_object.split("_")[0]:12s}: dist mean:{np.array(total_dists[action][trg_object]).mean():.3f}, success rate: {(np.array(total_dists[action][trg_object]) == 0).sum() / len(total_dists[action][trg_object]):.3f} ({(np.array(total_dists[action][trg_object]) == 0).sum()}/{len(total_dists[action][trg_object])})')
+        print(f'==={action.split("_")[0].upper().center(6)}===: dist mean:{np.mean(action_dists):.3f}, success rate: {(np.array(action_dists)==0).sum() / len(action_dists):.3f} ({(np.array(action_dists)==0).sum()}/{len(action_dists)})')
+    print(f'=== ALL  ===: dist mean:{np.mean(all_dists):.3f}, success rate: {(np.array(all_dists)==0).sum() / len(all_dists):.3f} ({(np.array(all_dists)==0).sum()}/{len(all_dists)})')
 
 
 def plot_img_pairs(imglist, src_points, trg_points, cos_maps, trg_mask, save_name='corr.png', fig_size=3, alpha=0.45, scatter_size=30):
@@ -171,36 +172,13 @@ if __name__ == '__main__':
     dift = SDFeaturizer()
     ft, imglist = [], []
 
-    # decrease these two if you don't have enough RAM or GPU memory
     img_size = 768
     ensemble_size = 8
-    visualize_cos_maps = False
-    total_dists = dataset_walkthrough(img_size, ensemble_size, visualize=visualize_cos_maps)
-    with open('total_dists.pkl', 'wb') as f:
+    exp_name = 'avg_pts'
+    average_pts, visualize = True, True
+    # with open('results/{exp_name}/total_dists.pkl', 'rb') as f:
+    #     total_dists = pickle.load(f)
+    total_dists = dataset_walkthrough(dift, img_size, ensemble_size, exp_name, average_pts, visualize)
+    with open(f'results/{exp_name}/total_dists.pkl', 'wb') as f:
         pickle.dump(total_dists, f)
     analyze_dists(total_dists)
-    # filelist = ['eval_all/egocentric/drag/suitcase/suitcase_000529/cabinet_01.png', 'eval_all/egocentric/drag/suitcase/suitcase_000529/suitcase_000529.jpg']
-    # prompts = [f'a photo of a cabinet', f'a photo of suitcase']
-    # with open('eval_all/egocentric/drag/suitcase/suitcase_000529/cabinet_01.txt', 'r') as f:
-    #     lines = f.readlines()
-    #     src_points = [list(map(float, line.rstrip().split(','))) for line in lines if re.match(r'^\d+.\d+,\d+.\d+$', line.rstrip())]
-    # mask_file = 'eval_all/GT/drag/suitcase/suitcase_000529.png'
-    # with Image.open(mask_file) as img:
-    #     trg_mask = np.array(img) > 122
-    # # category = 'cat'
-    # # filelist = ['./assets/cat.png', './assets/target_cat.png']
-    # # prompts = ['a photo of a cat', 'a photo of a cat']
-    # # src_points = [[582, 582], [482, 924]]
-    
-    # for i, filename in enumerate(filelist):
-    #     with Image.open(filename) as img:
-    #         img = Image.open(filename).convert('RGB')
-    #         imglist.append(img)
-    
-    # trg_points, cor_maps = get_cor_pairs(dift, filelist[0], filelist[1], src_points, prompts[0], prompts[1], img_size, ensemble_size, average_pts=True, return_cos_maps=visualize_cos_maps)
-    # trg_dist = [nearest_distance_to_mask_contour(trg_mask, trg_point[0], trg_point[1]) for trg_point in trg_points]
-    # print(src_points)
-    # print(trg_points)
-    # print(trg_dist)
-    # if visualize_cos_maps:
-    #     plot_img_pairs(imglist, src_points, trg_points, cor_maps, trg_mask)

@@ -164,3 +164,4 @@ cython_debug/
 
 eval_all
 results
+*.png
