@@ -43,10 +43,11 @@ def dataset_walkthrough(dift, img_size, ensemble_size, exp_name, average_pts=Tru
                 trg_point = np.mean(trg_points, axis=0)
                 trg_dist = nearest_distance_to_mask_contour(trg_mask, trg_point[0], trg_point[1])
                 total_dists[action][trg_object].append(trg_dist)
+                print(trg_point, trg_dist)
                 if visualize:
                     imglist = [Image.open(file).convert('RGB') for file in [src_image, trg_image]]
                     os.makedirs(f'results/{exp_name}/{action}/{trg_object}', exist_ok=True)
-                    plot_img_pairs(imglist, src_points, trg_points, cor_maps, trg_mask, f'results/{exp_name}/{action}/{trg_object}/{instance}.png')
+                    plot_img_pairs(imglist, src_points, trg_points, cor_maps, trg_mask, f'results/{exp_name}/{action}/{trg_object}/{instance}_{trg_dist:.2f}.png')
     return total_dists
 
 
@@ -92,17 +93,20 @@ def plot_img_pairs(imglist, src_points, trg_points, cos_maps, trg_mask, save_nam
 
 
 def nearest_distance_to_mask_contour(mask, x, y):
-    
     # Convert the boolean mask to an 8-bit image
     mask_8bit = (mask.astype(np.uint8) * 255)
     
     # Find the contours in the mask
-    contours, _ = cv2.findContours(mask_8bit, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(mask_8bit, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    print(len(contours))
     
     # Check if point is inside any contour
+    num = 0
     for contour in contours:
         if cv2.pointPolygonTest(contour, (x, y), False) == 1:  # Inside contour
-            return 0
+            num += 1
+    if num % 2 == 1:
+        return 0
     
     # If point is outside all contours, find the minimum distance between the point and each contour
     min_distance = float('inf')
@@ -111,9 +115,9 @@ def nearest_distance_to_mask_contour(mask, x, y):
         if distance < min_distance:
             min_distance = distance
 
+    # normalize the distance with the diagonal length of the mask
     diag_len = np.sqrt(mask.shape[0]**2 + mask.shape[1]**2)
     return abs(min_distance) / diag_len
-
 
 def get_cor_pairs(dift, src_image, trg_image, src_points, src_prompt, trg_prompt, img_size, ensemble_size, average_pts=True, return_cos_maps=False):
     """

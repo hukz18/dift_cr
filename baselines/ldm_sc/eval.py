@@ -10,17 +10,20 @@ from optimize import optimize_prompt, run_image_with_tokens_cropped, find_max_pi
 
 
 def nearest_distance_to_mask_contour(mask, x, y):
-    
     # Convert the boolean mask to an 8-bit image
     mask_8bit = (mask.astype(np.uint8) * 255)
     
     # Find the contours in the mask
-    contours, _ = cv2.findContours(mask_8bit, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(mask_8bit, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    print(len(contours))
     
     # Check if point is inside any contour
+    num = 0
     for contour in contours:
         if cv2.pointPolygonTest(contour, (x, y), False) == 1:  # Inside contour
-            return 0
+            num += 1
+    if num % 2 == 1:
+        return 0
     
     # If point is outside all contours, find the minimum distance between the point and each contour
     min_distance = float('inf')
@@ -29,6 +32,7 @@ def nearest_distance_to_mask_contour(mask, x, y):
         if distance < min_distance:
             min_distance = distance
 
+    # normalize the distance with the diagonal length of the mask
     diag_len = np.sqrt(mask.shape[0]**2 + mask.shape[1]**2)
     return abs(min_distance) / diag_len
 
@@ -150,14 +154,14 @@ def dataset_walkthrough(ldm, img_size, exp_name, visualize=False, average_pts=Tr
                 total_dists[action][trg_object].append(trg_dist)
                 if visualize:
                     imglist = [Image.open(file).convert('RGB') for file in [src_image, trg_image]]
-                    os.makedirs(f'results/baselines/ldm_sc/{exp_name}/{action}/{trg_object}', exist_ok=True)
+                    os.makedirs(f'results/baselines/ldm_sc/{exp_name}/{action}/{trg_object}_{trg_dist:.2f}', exist_ok=True)
                     plot_img_pairs(imglist, [src_points, trg_points], trg_mask, f'results/baselines/ldm_sc/{exp_name}/{action}/{trg_object}/{instance}.png')
     return total_dists
 
 
 if __name__ == '__main__':
     img_size = 512
-    visualize, average_pts = True, False
+    visualize, average_pts = False, True
     exp_name = 'no_avg_pts'
     ldm = load_ldm('cuda:0', 'CompVis/stable-diffusion-v1-4')
     # src_image = 'eval_all/egocentric/drag/suitcase/suitcase_000529/cabinet_01.png'
