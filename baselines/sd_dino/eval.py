@@ -1,6 +1,7 @@
 import os
 import re
 import cv2
+import torch
 import pickle
 import numpy as np
 from PIL import Image
@@ -8,6 +9,7 @@ from tqdm import tqdm
 from get_corr import get_corr_pairs
 from extractor_sd import load_model
 import matplotlib.pyplot as plt
+from extractor_dino import ViTExtractor
 
 def nearest_distance_to_mask_contour(mask, x, y):
     # Convert the boolean mask to an 8-bit image
@@ -67,7 +69,7 @@ def plot_img_pairs(imglist, points, trg_mask, save_name='corr.png', fig_size=3, 
     plt.savefig(save_name)
     plt.close()
     
-def dataset_walkthrough(model, aug, exp_name, visualize=False, average_pts=True):
+def dataset_walkthrough(model, aug, extractor, exp_name, visualize=False, average_pts=True):
     base_dir, gt_dir = 'eval_all/egocentric', 'eval_all/GT'
     total_dists = {}
     for action in (pbar_a := tqdm(os.listdir(base_dir))):
@@ -96,7 +98,7 @@ def dataset_walkthrough(model, aug, exp_name, visualize=False, average_pts=True)
                             if average_pts:
                                 src_points = [np.mean(np.array(src_points), axis=0).astype(np.int32)]
                 src_prompt, trg_prompt = [f'a photo of a {src_object}', f'a photo of {trg_object}']
-                trg_points = get_corr_pairs(model, aug, src_image, trg_image, src_points, src_prompt, trg_prompt)
+                trg_points = get_corr_pairs(model, aug, extractor, src_image, trg_image, src_points, src_prompt, trg_prompt)
                 trg_point = np.mean(trg_points, axis=0)
                 trg_dist = nearest_distance_to_mask_contour(trg_mask, trg_point[0], trg_point[1])
                 total_dists[action][trg_object].append(trg_dist)
@@ -108,9 +110,13 @@ def dataset_walkthrough(model, aug, exp_name, visualize=False, average_pts=True)
 
 if __name__ == '__main__':
     visualize = True
-    exp_name, average_pts = 'avg_pts', True
+    exp_name, average_pts = 'no_avg_pts', False
+    model_type = 'dinov2_vitb14'
+    stride = 14 if 'v2' in model_type else 8
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    extractor = ViTExtractor(model_type, stride, device=device)
     model, aug = load_model(diffusion_ver='v1-5', image_size=960, num_timesteps=100, block_indices=(2,5,8,11))
-    total_dists = dataset_walkthrough(model, aug, exp_name, visualize, average_pts)
+    total_dists = dataset_walkthrough(model, aug, extractor, exp_name, visualize, average_pts)
     analyze_dists(total_dists)
     with open(f'results/baselines/sd_dino/{exp_name}/total_dists.pkl', 'wb') as f:
         pickle.dump(total_dists, f)

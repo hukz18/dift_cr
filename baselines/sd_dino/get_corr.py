@@ -2,7 +2,6 @@ import os
 import torch
 from tqdm import tqdm
 from PIL import Image
-from extractor_dino import ViTExtractor
 from extractor_sd import process_features_and_mask
 from corr_utils import resize, pairwise_sim, co_pca, chunk_cosine_sim
 import numpy as np
@@ -32,7 +31,7 @@ PASCAL = False
 RAW = False
 
 @torch.no_grad()
-def get_corr_pairs(model, aug, src_image, trg_image, src_points, src_prompt, trg_prompt, dist='l2'):
+def get_corr_pairs(model, aug, extractor, src_image, trg_image, src_points, src_prompt, trg_prompt, dist='l2'):
     sd_size = 960
     dino_size = 840 if DINOV2 else 224 if ONLY_DINO else 480
     model_dict={'small':'dinov2_vits14',
@@ -51,15 +50,17 @@ def get_corr_pairs(model, aug, src_image, trg_image, src_points, src_prompt, trg
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     # indiactor = 'v2' if DINOV2 else 'v1'
     # model_size = model_type.split('vit')[-1]
-    extractor = ViTExtractor(model_type, stride, device=device)
+    
     patch_size = extractor.model.patch_embed.patch_size[0] if DINOV2 else extractor.model.patch_embed.patch_size
     num_patches = int(patch_size / stride * (dino_size // patch_size - 1) + 1)
 
     # Load image 1
     src_image = Image.open(src_image).convert('RGB')
+    src_w, src_h = src_image.size
     src_sd_input = resize(src_image, sd_size, resize=True, to_pil=True, edge=EDGE_PAD)
     src_dino_input = resize(src_image, dino_size, resize=True, to_pil=True, edge=EDGE_PAD)
-    src_points = torch.Tensor(src_points) # N * 3
+    src_x_scale, src_y_scale = dino_size / src_w, dino_size / src_h
+    src_points = torch.Tensor([[int(np.round(x * src_x_scale)), int(np.round(y * src_y_scale))] for (x, y) in src_points])
 
     # Get patch index for the keypoints
     src_y, src_x = src_points[:, 1].numpy(), src_points[:, 0].numpy()
@@ -69,8 +70,10 @@ def get_corr_pairs(model, aug, src_image, trg_image, src_points, src_prompt, trg
 
     # Load image 2
     trg_image = Image.open(trg_image).convert('RGB')
+    trg_w, trg_h = trg_image.size
     trg_sd_input = resize(trg_image, sd_size, resize=True, to_pil=True, edge=EDGE_PAD)
     trg_dino_input = resize(trg_image, dino_size, resize=True, to_pil=True, edge=EDGE_PAD)
+    trg_x_scale, trg_y_scale = dino_size / trg_w, dino_size / trg_h
     
     if not CO_PCA:
         if not ONLY_DINO:
@@ -181,7 +184,8 @@ def get_corr_pairs(model, aug, src_image, trg_image, src_points, src_prompt, trg
     nn_y_patch, nn_x_patch = nn_1_to_2 // num_patches, nn_1_to_2 % num_patches
     nn_x = (nn_x_patch - 1) * stride + stride + patch_size // 2 - .5
     nn_y = (nn_y_patch - 1) * stride + stride + patch_size // 2 - .5
-    kps_1_to_2 = torch.stack([nn_x, nn_y]).permute(1, 0)
+    trg_points = torch.stack([nn_x, nn_y]).permute(1, 0).cpu().numpy()
+    trg_points = [[int(np.round(x / trg_x_scale)), int(np.round(y / trg_y_scale))] for (x, y) in trg_points]
 
-    return kps_1_to_2.cpu().numpy()
+    return trg_points
 
