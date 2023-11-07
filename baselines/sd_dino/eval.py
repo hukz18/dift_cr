@@ -6,7 +6,7 @@ import pickle
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
-from get_corr import get_corr_pairs
+from get_corr import get_cor_pairs
 from extractor_sd import load_model
 import matplotlib.pyplot as plt
 from extractor_dino import ViTExtractor
@@ -98,7 +98,7 @@ def dataset_walkthrough(model, aug, extractor, exp_name, visualize=False, averag
                             if average_pts:
                                 src_points = [np.mean(np.array(src_points), axis=0).astype(np.int32)]
                 src_prompt, trg_prompt = [f'a photo of a {src_object}', f'a photo of {trg_object}']
-                trg_points = get_corr_pairs(model, aug, extractor, src_image, trg_image, src_points, src_prompt, trg_prompt)
+                trg_points = get_cor_pairs(model, aug, extractor, src_image, trg_image, src_points, src_prompt, trg_prompt)
                 trg_point = np.mean(trg_points, axis=0)
                 trg_dist = nearest_distance_to_mask_contour(trg_mask, trg_point[0], trg_point[1])
                 total_dists[action][trg_object].append(trg_dist)
@@ -109,7 +109,7 @@ def dataset_walkthrough(model, aug, extractor, exp_name, visualize=False, averag
     return total_dists
 
 if __name__ == '__main__':
-    visualize = True
+    visualize = False
     exp_name, average_pts = 'no_avg_pts', False
     model_type = 'dinov2_vitb14'
     stride = 14 if 'v2' in model_type else 8

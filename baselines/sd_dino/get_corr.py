@@ -31,7 +31,7 @@ PASCAL = False
 RAW = False
 
 @torch.no_grad()
-def get_corr_pairs(model, aug, extractor, src_image, trg_image, src_points, src_prompt, trg_prompt, dist='l2'):
+def get_cor_pairs(model, aug, extractor, src_image, trg_image, src_points, src_prompt, trg_prompt, dist='l2'):
     sd_size = 960
     dino_size = 840 if DINOV2 else 224 if ONLY_DINO else 480
     model_dict={'small':'dinov2_vits14',

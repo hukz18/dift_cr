@@ -186,16 +186,18 @@ class OneStepSDPipeline(StableDiffusionPipeline):
 
 
 class SDFeaturizer:
-    def __init__(self, sd_id='stabilityai/stable-diffusion-2-1'):
+    def __init__(self, device="cuda"):
+        sd_id='stabilityai/stable-diffusion-2-1'
         unet = MyUNet2DConditionModel.from_pretrained(sd_id, subfolder="unet", local_files_only=True)
         onestep_pipe = OneStepSDPipeline.from_pretrained(sd_id, unet=unet, safety_checker=None, local_files_only=True)
         onestep_pipe.vae.decoder = None
         onestep_pipe.scheduler = DDIMScheduler.from_pretrained(sd_id, subfolder="scheduler")
         gc.collect()
-        onestep_pipe = onestep_pipe.to("cuda")
+        onestep_pipe = onestep_pipe.to(device)
         onestep_pipe.enable_attention_slicing()
         onestep_pipe.enable_xformers_memory_efficient_attention()
         self.pipe = onestep_pipe
+        self.device = device
 
     @torch.no_grad()
     def forward(self, 
@@ -214,10 +216,10 @@ class SDFeaturizer:
         Return:
             unet_ft: a torch tensor in the shape of [1, c, h, w]
         '''
-        img_tensor = img_tensor.repeat(ensemble_size, 1, 1, 1).cuda() # ensem, c, h, w
+        img_tensor = img_tensor.repeat(ensemble_size, 1, 1, 1).to(self.device) # ensem, c, h, w
         prompt_embeds = self.pipe._encode_prompt(
             prompt=prompt,
-            device='cuda',
+            device=self.device,
             num_images_per_prompt=1,
             do_classifier_free_guidance=False) # [1, 77, dim]
         prompt_embeds = prompt_embeds.repeat(ensemble_size, 1, 1)
