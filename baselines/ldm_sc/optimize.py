@@ -17,7 +17,7 @@ from diffusers import StableDiffusionPipeline, DDIMScheduler
 import numpy as np
 import abc
 from PIL import Image
-import ptp_utils
+from baselines.ldm_sc.ptp_utils import diffusion_step, register_attention_control
 import torch.nn.functional as F
 
 import torch.nn as nn
@@ -246,11 +246,11 @@ def run_image_with_tokens_cropped(ldm, image, tokens, device='cuda', from_where 
     
         controller = AttentionStore()
             
-        ptp_utils.register_attention_control(ldm, controller)
+        register_attention_control(ldm, controller)
         
         latents = ldm.scheduler.add_noise(latents, torch.rand_like(latents), ldm.scheduler.timesteps[-3])
         
-        latents = ptp_utils.diffusion_step(ldm, controller, latents, tokens, ldm.scheduler.timesteps[-3], cfg=False)
+        latents = diffusion_step(ldm, controller, latents, tokens, ldm.scheduler.timesteps[-3], cfg=False)
         
         assert height == width
         
@@ -506,9 +506,9 @@ def optimize_prompt(ldm, image, pixel_loc, context=None, device="cuda", num_step
         
         controller = AttentionStore()
         
-        ptp_utils.register_attention_control(ldm, controller)
+        register_attention_control(ldm, controller)
         
-        _ = ptp_utils.diffusion_step(ldm, controller, noisy_image, context, ldm.scheduler.timesteps[noise_level], cfg = False)
+        _ = diffusion_step(ldm, controller, noisy_image, context, ldm.scheduler.timesteps[noise_level], cfg = False)
         
         attention_maps = upscale_to_img_size(controller, from_where = from_where, upsample_res=upsample_res, layers = layers)
         num_maps = attention_maps.shape[0]

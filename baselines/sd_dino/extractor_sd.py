@@ -166,7 +166,7 @@ def build_demo_classes_and_metadata(vocab, label_list):
 import sys
 
 
-def load_model(config_path="Panoptic/odise_label_coco_50e.py", seed=42, diffusion_ver="v1-3", image_size=1024, num_timesteps=0, block_indices=(2,5,8,11), decoder_only=True, encoder_only=False, resblock_only=False):
+def load_model(device="cuda", config_path="Panoptic/odise_label_coco_50e.py", seed=42, diffusion_ver="v1-5", image_size=960, num_timesteps=100, block_indices=(2,5,8,11), decoder_only=True, encoder_only=False, resblock_only=False):
     cfg = model_zoo.get_config(config_path, trained=True)
 
     cfg.model.backbone.feature_extractor.init_checkpoint = "sd://"+diffusion_ver
@@ -186,7 +186,7 @@ def load_model(config_path="Panoptic/odise_label_coco_50e.py", seed=42, diffusio
     aug = instantiate(dataset_cfg.mapper).augmentations
 
     model = instantiate_odise(cfg.model)
-    model.to(cfg.train.device)
+    model.to(device)
     ODISECheckpointer(model).load(cfg.train.init_checkpoint)
 
     return model, aug

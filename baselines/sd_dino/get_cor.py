@@ -3,7 +3,7 @@ import torch
 from tqdm import tqdm
 from PIL import Image
 from extractor_sd import process_features_and_mask
-from corr_utils import resize, pairwise_sim, co_pca, chunk_cosine_sim
+from baselines.sd_dino.cor_utils import resize, pairwise_sim, co_pca, chunk_cosine_sim
 import numpy as np
 import torch.nn.functional as F
 torch.backends.cudnn.benchmark = True
@@ -31,7 +31,7 @@ PASCAL = False
 RAW = False
 
 @torch.no_grad()
-def get_cor_pairs(model, aug, extractor, src_image, trg_image, src_points, src_prompt, trg_prompt, dist='l2'):
+def get_cor_pairs(model, aug, extractor, src_image, trg_image, src_points, src_prompt, trg_prompt, dist='l2', device='cuda'):
     sd_size = 960
     dino_size = 840 if DINOV2 else 224 if ONLY_DINO else 480
     model_dict={'small':'dinov2_vits14',
@@ -47,7 +47,6 @@ def get_cor_pairs(model, aug, extractor, src_image, trg_image, src_points, src_p
         layer = 39
     facet = 'token' if DINOV2 else 'key'
     stride = 14 if DINOV2 else 4 if ONLY_DINO else 8
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     # indiactor = 'v2' if DINOV2 else 'v1'
     # model_size = model_type.split('vit')[-1]
     

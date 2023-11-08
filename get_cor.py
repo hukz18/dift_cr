@@ -6,7 +6,7 @@ from PIL import Image
 from torchvision.transforms import PILToTensor
 
 
-def get_cor_pairs(dift, src_image, trg_image, src_points, src_prompt, trg_prompt, img_size, ensemble_size, average_pts=True, return_cos_maps=False):
+def get_cor_pairs(dift, src_image, trg_image, src_points, src_prompt, trg_prompt, img_size, ensemble_size=8, return_cos_maps=False):
     """
     src_image, trg_image: relative path of src and trg images
     src_points: resized affordance points in src_image
@@ -34,8 +34,6 @@ def get_cor_pairs(dift, src_image, trg_image, src_points, src_prompt, trg_prompt
     num_channel = src_ft.size(1)
     cos = nn.CosineSimilarity(dim=1)
     
-    if average_pts:
-        src_points = [np.mean(np.array(src_points), axis=0).astype(np.int32)]
     
     src_ft = nn.Upsample(size=(img_size, img_size), mode='bilinear')(src_ft)
     src_vectors = [src_ft[0, :, y, x].view(1, num_channel, 1, 1) for (x, y) in src_points]

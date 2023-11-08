@@ -6,9 +6,54 @@ import numpy as np
 from tqdm import tqdm
 from PIL import Image
 import matplotlib.pyplot as plt
-from get_corr import get_cor_pairs
-from src.models.dift_sd import SDFeaturizer
+import logging
 
+def set_global_logging_level(level=logging.ERROR, prefices=[""]):
+    prefix_re = re.compile(fr'^(?:{ "|".join(prefices) })')
+    for name in logging.root.manager.loggerDict:
+        if re.match(prefix_re, name):
+            logging.getLogger(name).setLevel(level)
+            
+def get_cor_cfg(method):
+    cor_cfg = {}
+    if method == 'dift':
+        cor_cfg['img_size'] = 768
+        cor_cfg['ensemble_size'] = 8
+    elif method == 'ldm_sc':
+        cor_cfg['img_size'] = 512
+    elif method == 'sd_dino':
+        cor_cfg['model_type'] = 'dinov2_vitb14'
+    return cor_cfg
+
+def get_cor_pairs(method, model, src_image, trg_image, src_points, src_prompt, trg_prompt, cfg, device='cuda'):
+    if method == 'dift':
+        from get_cor import get_cor_pairs as get_cor_pairs_dift
+        return get_cor_pairs_dift(model, src_image, trg_image, src_points, src_prompt, trg_prompt, cfg['img_size'], cfg['ensemble_size'], return_cos_maps=cfg['visualize'])
+    elif method == 'ldm_sc':
+        from baselines.ldm_sc.get_cor import get_cor_pairs as get_cor_paris_ldm_sc
+        return get_cor_paris_ldm_sc(model, src_image, trg_image, src_points, cfg['img_size'], device), None
+    elif method == 'sd_dino':
+        from baselines.sd_dino.get_cor import get_cor_pairs as get_cor_pairs_sd_dino
+        model, aug, extractor = model
+        return get_cor_pairs_sd_dino(model, aug, extractor, src_image, trg_image, src_points, src_prompt, trg_prompt, device=device), None
+    else:
+        raise NotImplementedError
+
+def get_model(method, cor_cfg, device='cuda'):
+    if method == 'dift':
+        from src.models.dift_sd import SDFeaturizer
+        return SDFeaturizer(device)
+    elif method == 'ldm_sc':
+        from baselines.ldm_sc.optimize import load_ldm
+        return load_ldm(device, 'CompVis/stable-diffusion-v1-4')
+    elif method == 'sd_dino':
+        from baselines.sd_dino.extractor_sd import load_model
+        from baselines.sd_dino.extractor_dino import ViTExtractor
+        model_type = cor_cfg['model_type']
+        stride = 14 if 'v2' in model_type else 8
+        extractor = ViTExtractor(model_type, stride, device=device)
+        model, aug = load_model(diffusion_ver='v1-5', image_size=960, num_timesteps=100, block_indices=(2,5,8,11))
+        return model, aug, extractor
 
 def plot_img_pairs(imglist, src_points, trg_points, trg_mask, cos_maps=None, save_name='corr.png', fig_size=3, alpha=0.45, scatter_size=30):
     num_imgs = len(cos_maps) + 1 if cos_maps is not None else 2
@@ -67,16 +112,20 @@ def nearest_distance_to_mask_contour(mask, x, y):
     return abs(min_distance) / diag_len
 
 
-def dataset_walkthrough(dift, img_size, ensemble_size, exp_name, average_pts=True, visualize=False):
+def dataset_walkthrough(base_dir, method, model, exp_name, cor_cfg={}, average_pts=True, visualize=False):
     eval_pairs = 0
     total_dists = {}
-    base_dir, gt_dir = 'eval_all/egocentric', 'eval_all/GT'
+    gt_dir = os.path.join(base_dir, 'GT')
+    base_dir = os.path.join(base_dir, 'egocentric')
     
     for action in os.listdir(base_dir):
         for trg_object in os.listdir(os.path.join(base_dir, action)):
             eval_pairs += len(os.listdir(os.path.join(base_dir, action, trg_object)))
     print(f'Start evaluating {eval_pairs} correspondance pairs...')
     
+    cor_cfg['device'] = 'cuda'
+    cor_cfg['visualize'] = visualize
+
     pbar = tqdm(total=eval_pairs)
     
     for action in os.listdir(base_dir):
@@ -99,17 +148,20 @@ def dataset_walkthrough(dift, img_size, ensemble_size, exp_name, average_pts=Tru
                         with open(os.path.join(instance_path, file), 'r') as f:
                             lines = f.readlines()
                             src_points = [list(map(float, line.rstrip().split(','))) for line in lines if re.match(r'^\d+.\d+,.*\d+.\d+$', line.rstrip())]
+                            if average_pts:
+                                src_points = [np.mean(np.array(src_points), axis=0).astype(np.int32)]
                 pbar.set_description(f'{action}-{trg_object}-{instance}')
                 prompts = [f'a photo of a {src_object}', f'a photo of {trg_object}']
-                trg_points, cor_maps = get_cor_pairs(dift, src_image, trg_image, src_points, prompts[0], prompts[1], img_size, ensemble_size, average_pts, return_cos_maps=visualize)
+                trg_points, cor_maps = get_cor_pairs(method, model, src_image, trg_image, src_points, prompts[0], prompts[1], cor_cfg)
                 trg_point = np.mean(trg_points, axis=0)
                 trg_dist = nearest_distance_to_mask_contour(trg_mask, trg_point[0], trg_point[1])
                 total_dists[action][trg_object].append(trg_dist)
                 # print(trg_point, trg_dist)
                 if visualize:
+                    res_dir = f'results/{exp_name}/{action}/{trg_object}' if method == 'dift' else f'results/baselines/{method}/{exp_name}/{action}/{trg_object}'
                     imglist = [Image.open(file).convert('RGB') for file in [src_image, trg_image]]
-                    os.makedirs(f'results/{exp_name}/{action}/{trg_object}', exist_ok=True)
-                    plot_img_pairs(imglist, src_points, trg_points, trg_mask, cor_maps, f'results/{exp_name}/{action}/{trg_object}/{instance}_{trg_dist:.2f}.png')
+                    os.makedirs(res_dir, exist_ok=True)
+                    plot_img_pairs(imglist, src_points, trg_points, trg_mask, cor_maps, os.path.join(res_dir, f'{instance}_{trg_dist:.2f}.png'))
                 pbar.update(1)
     pbar.close()
     return total_dists
@@ -132,16 +184,20 @@ def analyze_dists(total_dists, dump_name=None):
         print(line)
 
 if __name__ == '__main__':
-    dift = SDFeaturizer()
-    ft, imglist = [], []
-
-    img_size = 768
-    ensemble_size = 8
+    method = 'sd_dino'
     exp_name = 'secr_avg_pts'
-    average_pts, visualize = True, True
-    # with open(f'results/{exp_name}/total_dists.pkl', 'rb') as f:
+    average_pts, visualize = True, False
+    
+    cor_cfg = get_cor_cfg(method)
+    # set_global_logging_level(logging.ERROR)
+    model = get_model(method, cor_cfg, device='cuda')
+    base_dir = 'eval_secr'
+    res_dir = f'results/{exp_name}' if method == 'dift' else f'results/baselines/{method}/{exp_name}'
+    # with open(f'os.path.join(res_dir, 'total_dists.pkl'), 'rb') as f:
     #     total_dists = pickle.load(f)
-    total_dists = dataset_walkthrough(dift, img_size, ensemble_size, exp_name, average_pts, visualize)
-    with open(f'results/{exp_name}/total_dists.pkl', 'wb') as f:
+    
+    total_dists = dataset_walkthrough(base_dir, method, model, exp_name, cor_cfg, average_pts, visualize)
+    with open(os.path.join(res_dir, 'total_dists.pkl'), 'wb') as f:
         pickle.dump(total_dists, f)
-    analyze_dists(total_dists, f'results/{exp_name}/total_dists.txt')
+    
+    analyze_dists(total_dists, os.path.join(res_dir, 'total_dists.txt'))

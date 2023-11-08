@@ -7,17 +7,36 @@ import numpy as np
 from tqdm import tqdm
 from PIL import Image
 import matplotlib.pyplot as plt
-from get_corr import get_cor_pairs
-from src.models.dift_sd import SDFeaturizer
+from eval import get_cor_pairs, get_cor_cfg, set_global_logging_level
 import multiprocessing
 from multiprocessing import Pool
 from multiprocessing.pool import ThreadPool
 
-
-
+def get_models(method, cor_cfg, num_workers):
+    thread_pool = ThreadPool(num_workers)
+    if method == 'dift':
+        from src.models.dift_sd import SDFeaturizer
+        models =  thread_pool.map(SDFeaturizer, ['cuda:%d' % i for i in range(num_workers)])
+    elif method == 'ldm_sc':
+        from baselines.ldm_sc.optimize import load_ldm
+        models = thread_pool.starmap(load_ldm, [('cuda:%d' % i , 'CompVis/stable-diffusion-v1-4') for i in range(num_workers)])
+    elif method == 'sd_dino':
+        from baselines.sd_dino.extractor_sd import load_model
+        from baselines.sd_dino.extractor_dino import ViTExtractor
+        model_type = cor_cfg['model_type']
+        stride = 14 if 'v2' in model_type else 8
+        extractors = thread_pool.starmap(ViTExtractor, [(model_type, stride, None, 'cuda:%d' % i) for i in range(num_workers)])
+        models_and_augs = thread_pool.map(load_model, ['cuda:%d' % i for i in range(num_workers)])
+        models = [(model, aug, extractor) for (model, aug), extractor in zip(models_and_augs, extractors)]
+    
+    thread_pool.terminate()
+    print(f'Done initializing models on {num_workers} GPUs')
+    return models
+    
 def init_worker():
     """This will be called each time a worker is created."""
     torch.set_grad_enabled(False)
+    set_global_logging_level()
     
 def plot_img_pairs(imglist, src_points, trg_points, trg_mask, cos_maps=None, save_name='corr.png', fig_size=3, alpha=0.45, scatter_size=30):
     num_imgs = len(cos_maps) + 1 if cos_maps is not None else 2
@@ -78,11 +97,13 @@ def nearest_distance_to_mask_contour(mask, x, y):
 
 # one list to store action, trg_object, one list for rets, if list is full pop all and get return
 # add a "eval one" option
-def dataset_walkthrough(dift_list, img_size, ensemble_size, exp_name, average_pts=True, visualize=False, num_workers=1):
+def dataset_walkthrough(base_dir, model_list, exp_name, cor_cfg={}, average_pts=True, visualize=False, num_workers=1):
     eval_pairs, attached_pairs = 0, 0
     total_dists = {}
-    base_dir, gt_dir = 'eval_secr/egocentric', 'eval_secr/GT'
+    gt_dir = os.path.join(base_dir, 'GT')
+    base_dir = os.path.join(base_dir, 'egocentric')
     
+    cor_cfg['visualize'] = visualize
     for action in os.listdir(base_dir):
         for trg_object in os.listdir(os.path.join(base_dir, action)):
             eval_pairs += len(os.listdir(os.path.join(base_dir, action, trg_object)))
@@ -92,7 +113,7 @@ def dataset_walkthrough(dift_list, img_size, ensemble_size, exp_name, average_pt
     free_gpus = [i for i in range(num_workers)]
     
     pbar = tqdm(total=eval_pairs)
-    workers_pool = Pool(num_workers, initializer=init_worker)
+    workers_pool = Pool(num_workers, initializer=init_worker if method == 'dift' or method == 'sd_dino' else None)
     for action in os.listdir(base_dir):
         action_path = os.path.join(base_dir, action)
         total_dists[action] = {}
@@ -114,9 +135,11 @@ def dataset_walkthrough(dift_list, img_size, ensemble_size, exp_name, average_pt
                         with open(os.path.join(instance_path, file), 'r') as f:
                             lines = f.readlines()
                             src_points = [list(map(float, line.rstrip().split(','))) for line in lines if re.match(r'^\d+.\d+,.*\d+.\d+$', line.rstrip())]
+                            if average_pts:
+                                src_points = [np.mean(np.array(src_points), axis=0).astype(np.int32)]
                 prompts = [f'a photo of a {src_object}', f'a photo of {trg_object}']
-                gpu_id = free_gpus.pop()
-                ret_list.append(workers_pool.apply_async(get_cor_pairs, args=(dift_list[gpu_id], src_image, trg_image, src_points, prompts[0], prompts[1], img_size, ensemble_size, average_pts, visualize)))
+                gpu_id = free_gpus.pop(0)
+                ret_list.append(workers_pool.apply_async(get_cor_pairs, args=(method, model_list[gpu_id], src_image, trg_image, src_points, prompts[0], prompts[1], cor_cfg, f'cuda:{gpu_id}')))
                 param_buffer.append((src_points, trg_mask, trg_object, instance, action, src_image, trg_image))
                 attached_pairs += 1
                 if len(free_gpus) == 0 or attached_pairs == eval_pairs:
@@ -127,9 +150,10 @@ def dataset_walkthrough(dift_list, img_size, ensemble_size, exp_name, average_pt
                         trg_dist = nearest_distance_to_mask_contour(trg_mask, trg_point[0], trg_point[1])
                         total_dists[action][trg_object].append(trg_dist)
                         if visualize:
+                            res_dir = f'results/{exp_name}/{action}/{trg_object}' if method == 'dift' else f'results/baselines/{method}/{exp_name}/{action}/{trg_object}'
                             imglist = [Image.open(file).convert('RGB') for file in [src_image, trg_image]]
-                            os.makedirs(f'results/{exp_name}/{action}/{trg_object}', exist_ok=True)
-                            plot_img_pairs(imglist, src_points, trg_points, trg_mask, cor_maps, f'results/{exp_name}/{action}/{trg_object}/{instance}_{trg_dist:.2f}.png')
+                            os.makedirs(res_dir, exist_ok=True)
+                            plot_img_pairs(imglist, src_points, trg_points, trg_mask, cor_maps, os.path.join(res_dir, f'{instance}_{trg_dist:.2f}.png'))
                         pbar.update(1)
                     free_gpus = [i for i in range(num_workers)]
     pbar.close()
@@ -154,25 +178,27 @@ def analyze_dists(total_dists, dump_name=None):
         print(line)
 
 if __name__ == '__main__':
-    num_workers = 8
     multiprocessing.set_start_method("spawn")
-    # with Pool(num_workers, initializer=init_worker) as p:
-    #     models = p.map(SDFeaturizer, ['cuda:%d' % i for i in range(num_workers)])
-    thread_pool = ThreadPool(num_workers)
-    models = thread_pool.map(SDFeaturizer, ['cuda:%d' % i for i in range(num_workers)])
-    thread_pool.terminate()
     
-    print(f'Done initializing models on {num_workers} GPUs')
+    method = 'sd_dino'
+    num_workers = 2
+    
+    cor_cfg = get_cor_cfg(method)
+    models = get_models(method, cor_cfg, num_workers)
     
     ft, imglist = [], []
 
-    img_size = 768
-    ensemble_size = 8
+    base_dir = 'eval_secr'
     exp_name = 'avg_pts_secr'
-    average_pts, visualize = True, True
-    # with open(f'results/{exp_name}/total_dists.pkl', 'rb') as f:
+    average_pts, visualize = True, False
+
+    res_dir = f'results/{exp_name}' if method == 'dift' else f'results/baselines/{method}/{exp_name}'
+    # with open(f'os.path.join(res_dir, 'total_dists.pkl'), 'rb') as f:
     #     total_dists = pickle.load(f)
-    total_dists = dataset_walkthrough(models, img_size, ensemble_size, exp_name, average_pts, visualize, num_workers)
-    with open(f'results/{exp_name}/total_dists.pkl', 'wb') as f:
+    
+    total_dists = dataset_walkthrough(base_dir, models, exp_name, cor_cfg, average_pts, visualize, num_workers)
+    
+    with open(os.path.join(res_dir, 'total_dists.pkl'), 'wb') as f:
         pickle.dump(total_dists, f)
-    analyze_dists(total_dists, f'results/{exp_name}/total_dists.txt')
+    
+    analyze_dists(total_dists, os.path.join(res_dir, 'total_dists.txt'))
