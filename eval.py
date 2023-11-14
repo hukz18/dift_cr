@@ -69,31 +69,35 @@ def get_model(method, cor_cfg, device='cuda'):
         stride = cor_cfg['stride']
         return ViTExtractor(model_type, stride, device=device)
 
-def plot_img_pairs(imglist, src_points, trg_points, trg_mask, cos_maps=None, save_name='corr.png', fig_size=3, alpha=0.45, scatter_size=30):
-    num_imgs = len(cos_maps) + 1 if cos_maps is not None else 2
-    fig, axes = plt.subplots(1, num_imgs + 1, figsize=(fig_size*(num_imgs + 1), fig_size))
+def plot_img_pairs(imglist, src_points_list, trg_points_list, trg_mask, cos_map_list=None, save_name='corr.png', fig_size=5, alpha=0.45, scatter_size=30):
+    num_imgs = len(cos_map_list[0]) + 1 if cos_map_list[0] is not None else 2
+    src_images = len(imglist) - 1
+    fig, axes = plt.subplots(src_images, num_imgs + 1, figsize=(fig_size*(num_imgs + 1), fig_size*src_images))
     plt.tight_layout()
 
-    axes[0].imshow(imglist[0])
-    axes[0].axis('off')
-    axes[0].set_title('source image')
-    for x, y in src_points:
-        x, y = int(np.round(x)), int(np.round(y))
-        axes[0].scatter(x, y, s=scatter_size)
+    for i in range(src_images):
+        axes[i, 0].imshow(imglist[i])
+        axes[i, 0].axis('off')
+        axes[i, 0].set_title('source')
+        for x, y in src_points_list[i]:
+            x, y = int(np.round(x)), int(np.round(y))
+            axes[i, 0].scatter(x, y, s=scatter_size)
 
-    for i in range(1, num_imgs):
-        axes[i].imshow(imglist[1])
-        if cos_maps is not None:
-            heatmap = cos_maps[i - 1][0]
-            heatmap = (heatmap - np.min(heatmap)) / (np.max(heatmap) - np.min(heatmap))  # Normalize to [0, 1]
-            axes[i].imshow(255 * heatmap, alpha=alpha, cmap='viridis')
-        axes[i].axis('off')
-        axes[i].scatter(trg_points[i - 1][0], trg_points[i - 1][1], c='C%d' % (i - 1), s=scatter_size)
-        axes[i].set_title('target image')
-    
-    axes[-1].imshow(trg_mask, cmap='gray')
-    axes[-1].axis('off')
-    axes[-1].set_title('target mask')
+        for j in range(1, num_imgs):
+            axes[i, j].imshow(imglist[-1])
+            if cos_map_list[0] is not None:
+                heatmap = cos_map_list[i][j - 1][0]
+                heatmap = (heatmap - np.min(heatmap)) / (np.max(heatmap) - np.min(heatmap))  # Normalize to [0, 1]
+                axes[i, j].imshow(255 * heatmap, alpha=alpha, cmap='viridis')
+            axes[i, j].axis('off')
+            axes[i, j].scatter(trg_points_list[i][j - 1][0], trg_points_list[i][j - 1][1], c='C%d' % (j - 1), s=scatter_size)
+            axes[i, j].set_title('target')
+        
+        axes[i, -1].imshow(trg_mask, cmap='gray')
+        axes[i, -1].axis('off')
+        axes[i, -1].set_title('target mask')
+        trg_point = np.mean(trg_points_list[i], axis=0)
+        axes[i, -1].scatter(trg_point[0], trg_point[1], c='C%d' % (j - 1), s=scatter_size)
     plt.plot()
     plt.savefig(save_name)
     plt.close()
@@ -127,7 +131,7 @@ def nearest_distance_to_mask_contour(mask, x, y, mask_threshold):
     return abs(min_distance) / diag_len, np.array(mask)[int(y), int(x)]
 
 
-def dataset_walkthrough(base_dir, method, model, exp_name, cor_cfg={}, average_pts=True, visualize=False, mask_threshold=120):
+def dataset_walkthrough(base_dir, method, model, exp_name, cor_cfg={}, average_pts=True, visualize=False, mask_threshold=120, top_k=1):
     eval_pairs = 0
     total_dists, nss_values = {}, {}
     gt_dir = os.path.join(base_dir, 'GT')
@@ -147,6 +151,7 @@ def dataset_walkthrough(base_dir, method, model, exp_name, cor_cfg={}, average_p
         total_dists[trg_object], nss_values[trg_object] = [], []
         for instance in os.listdir(object_path):
             instance_path = os.path.join(object_path, instance)
+            src_images, src_points_list, trg_points_list, cor_map_list = [], [], [], []
             for file in os.listdir(instance_path):
                 if file.endswith('.jpg'):
                     trg_image = os.path.join(instance_path, file)
@@ -156,28 +161,32 @@ def dataset_walkthrough(base_dir, method, model, exp_name, cor_cfg={}, average_p
                             trg_mask = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
                         except:
                             trg_mask = np.array(img)
-                elif file.endswith('.txt'):
-                    src_image = os.path.join(instance_path, file).replace('txt', 'png')
+                elif file.endswith('.txt') and int(file.strip('.txt').split('top')[1]) <= top_k:
+                    src_images.append(os.path.join(instance_path, file).replace('txt', 'png'))
                     src_object = file.split('_')[0]
                     with open(os.path.join(instance_path, file), 'r') as f:
                         lines = f.readlines()
                         src_points = [list(map(float, line.rstrip().split(','))) for line in lines if re.match(r'^\d+.\d+,.*\d+.\d+$', line.rstrip())]
                         if average_pts:
                             src_points = [np.mean(np.array(src_points), axis=0).astype(np.int32)]
+                        src_points_list.append(src_points)
             pbar.set_description(f'{trg_object}-{instance}')
             prompts = [f'a photo of a {src_object}', f'a photo of {trg_object}']
-            trg_points, cor_maps = get_cor_pairs(method, model, src_image, trg_image, src_points, prompts[0], prompts[1], cor_cfg)
-            trg_point = np.mean(trg_points, axis=0)
+            for i in range(len(src_images)):
+                trg_points, cor_maps = get_cor_pairs(method, model, src_images[i], trg_image, src_points_list[i], prompts[0], prompts[1], cor_cfg)
+                trg_points_list.append(trg_points)
+                cor_map_list.append(cor_maps)
+            trg_point = np.mean(trg_points_list, axis=(0, 1))
             trg_dist, nss_value = nearest_distance_to_mask_contour(trg_mask, trg_point[0], trg_point[1], mask_threshold)
             total_dists[trg_object].append(trg_dist)
             nss_values[trg_object].append(nss_value)
-            # print(trg_point, trg_dist)
+            # print(trg_point, trg_dist)ipy
             if visualize:
                 res_dir =  f'results/{method}/{exp_name}/{trg_object}'
                 shutil.rmtree(res_dir, ignore_errors=True)
-                imglist = [Image.open(file).convert('RGB') for file in [src_image, trg_image]]
+                imglist = [Image.open(file).convert('RGB') for file in [*src_images, trg_image]]
                 os.makedirs(res_dir, exist_ok=True)
-                plot_img_pairs(imglist, src_points, trg_points, trg_mask, cor_maps, os.path.join(res_dir, f'{instance}_{trg_dist:.2f}_{nss_value}.png'))
+                plot_img_pairs(imglist, src_points_list, trg_points_list, trg_mask, cor_map_list, os.path.join(res_dir, f'{instance}_{trg_dist:.2f}_{nss_value}.png'))
             pbar.update(1)
     pbar.close()
     return total_dists, nss_values
@@ -199,14 +208,20 @@ def analyze_dists(total_dists, nss_values, dump_name=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--method', '-m', type=str, default='dift')
-    parser.add_argument('--dataset', '-d', type=str, default='clip_b32_crop')
+    parser.add_argument('--dataset', '-d', type=str, default='clip_b32_crop_5')
     parser.add_argument('--exp_name', '-e', type=str, default='')
-    parser.add_argument('--mask_threshold', '-t', type=int, default=120)
+    parser.add_argument('--mask_threshold', '-t', type=int, default=60)
     parser.add_argument('--visualize', '-v', action='store_true')
     parser.add_argument('--avg_pts', '-a', action='store_true')
+    parser.add_argument('--top_k', '-k', type=int, default=3)
     args = parser.parse_args()
     average_pts, visualize = args.avg_pts, args.visualize
-    exp_name = args.dataset + '_' + str(args.mask_threshold) if len(args.exp_name) == 0 else args.exp_name  + '_' + str(args.mask_threshold)
+    visualize = True
+    exp_name = args.dataset if len(args.exp_name) == 0 else args.exp_name
+    if args.mask_threshold != 60:
+        exp_name += '_s' + str(args.mask_threshold)
+    if args.top_k != 1:
+        exp_name += f'_top{args.top_k}'
     cor_cfg = get_cor_cfg(args.method)
     # set_global_logging_level(logging.ERROR)
     model = get_model(args.method, cor_cfg, device='cuda')
@@ -215,7 +230,7 @@ if __name__ == '__main__':
     # with open(f'os.path.join(res_dir, 'total_dists.pkl'), 'rb') as f:
     #     total_dists = pickle.load(f)
     
-    total_dists, nss_values = dataset_walkthrough(base_dir, args.method, model, exp_name, cor_cfg, average_pts, visualize, args.mask_threshold)
+    total_dists, nss_values = dataset_walkthrough(base_dir, args.method, model, exp_name, cor_cfg, average_pts, visualize, args.mask_threshold, args.top_k)
     with open(os.path.join(res_dir, 'results.pkl'), 'wb') as f:
         pickle.dump({'total_dists': total_dists, 'nss_values': nss_values}, f)
 
