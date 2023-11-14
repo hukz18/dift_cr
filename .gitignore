@@ -164,8 +164,9 @@ cython_debug/
 
 eval_all
 eval_secr
-results
+results*
 *.png
 *.zip
 .vscode
 test_*
+datasets

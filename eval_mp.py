@@ -150,7 +150,7 @@ def dataset_walkthrough(base_dir, model_list, exp_name, cor_cfg={}, average_pts=
                         trg_dist = nearest_distance_to_mask_contour(trg_mask, trg_point[0], trg_point[1])
                         total_dists[action][trg_object].append(trg_dist)
                         if visualize:
-                            res_dir = f'results/{exp_name}/{action}/{trg_object}' if method == 'dift' else f'results/baselines/{method}/{exp_name}/{action}/{trg_object}'
+                            res_dir = f'results/{method}/{exp_name}/{action}/{trg_object}'
                             imglist = [Image.open(file).convert('RGB') for file in [src_image, trg_image]]
                             os.makedirs(res_dir, exist_ok=True)
                             plot_img_pairs(imglist, src_points, trg_points, trg_mask, cor_maps, os.path.join(res_dir, f'{instance}_{trg_dist:.2f}.png'))
@@ -180,19 +180,19 @@ def analyze_dists(total_dists, dump_name=None):
 if __name__ == '__main__':
     multiprocessing.set_start_method("spawn")
     
-    method = 'sd_dino'
-    num_workers = 2
+    method = 'dift'
+    num_workers = 8
     
     cor_cfg = get_cor_cfg(method)
     models = get_models(method, cor_cfg, num_workers)
     
     ft, imglist = [], []
 
-    base_dir = 'eval_secr'
-    exp_name = 'avg_pts_secr'
-    average_pts, visualize = True, False
+    base_dir = 'datasets/lpips_clip'
+    exp_name = 'lpips_clip'
+    average_pts, visualize = True, True
 
-    res_dir = f'results/{exp_name}' if method == 'dift' else f'results/baselines/{method}/{exp_name}'
+    res_dir = f'results/{method}/{exp_name}'
     # with open(f'os.path.join(res_dir, 'total_dists.pkl'), 'rb') as f:
     #     total_dists = pickle.load(f)
     

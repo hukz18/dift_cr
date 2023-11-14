@@ -7,6 +7,8 @@ from tqdm import tqdm
 from PIL import Image
 import matplotlib.pyplot as plt
 import logging
+import argparse
+import shutil
 
 def set_global_logging_level(level=logging.ERROR, prefices=[""]):
     prefix_re = re.compile(fr'^(?:{ "|".join(prefices) })')
@@ -23,19 +25,26 @@ def get_cor_cfg(method):
         cor_cfg['img_size'] = 512
     elif method == 'sd_dino':
         cor_cfg['model_type'] = 'dinov2_vitb14'
+    elif method == 'dino_vit':
+        cor_cfg['img_size'] = 224
+        cor_cfg['model_type'] = 'dino_vits8'
+        cor_cfg['stride'] = 4
     return cor_cfg
 
 def get_cor_pairs(method, model, src_image, trg_image, src_points, src_prompt, trg_prompt, cfg, device='cuda'):
     if method == 'dift':
-        from get_cor import get_cor_pairs as get_cor_pairs_dift
-        return get_cor_pairs_dift(model, src_image, trg_image, src_points, src_prompt, trg_prompt, cfg['img_size'], cfg['ensemble_size'], return_cos_maps=cfg['visualize'])
+        from get_cor import get_cor_pairs
+        return get_cor_pairs(model, src_image, trg_image, src_points, src_prompt, trg_prompt, cfg['img_size'], cfg['ensemble_size'], return_cos_maps=cfg['visualize'])
     elif method == 'ldm_sc':
-        from baselines.ldm_sc.get_cor import get_cor_pairs as get_cor_paris_ldm_sc
-        return get_cor_paris_ldm_sc(model, src_image, trg_image, src_points, cfg['img_size'], device), None
+        from baselines.ldm_sc.get_cor import get_cor_pairs
+        return get_cor_pairs(model, src_image, trg_image, src_points, cfg['img_size'], device), None
     elif method == 'sd_dino':
-        from baselines.sd_dino.get_cor import get_cor_pairs as get_cor_pairs_sd_dino
+        from baselines.sd_dino.get_cor import get_cor_pairs
         model, aug, extractor = model
-        return get_cor_pairs_sd_dino(model, aug, extractor, src_image, trg_image, src_points, src_prompt, trg_prompt, device=device), None
+        return get_cor_pairs(model, aug, extractor, src_image, trg_image, src_points, src_prompt, trg_prompt, device=device), None
+    elif method == 'dino_vit':
+        from baselines.dino_vit.get_cor import get_cor_pairs
+        return get_cor_pairs(model, src_image, trg_image, src_points, cfg['img_size'], device=device)
     else:
         raise NotImplementedError
 
@@ -54,6 +63,11 @@ def get_model(method, cor_cfg, device='cuda'):
         extractor = ViTExtractor(model_type, stride, device=device)
         model, aug = load_model(diffusion_ver='v1-5', image_size=960, num_timesteps=100, block_indices=(2,5,8,11))
         return model, aug, extractor
+    elif method == 'dino_vit':
+        from baselines.dino_vit.extractor import ViTExtractor
+        model_type = cor_cfg['model_type']
+        stride = cor_cfg['stride']
+        return ViTExtractor(model_type, stride, device=device)
 
 def plot_img_pairs(imglist, src_points, trg_points, trg_mask, cos_maps=None, save_name='corr.png', fig_size=3, alpha=0.45, scatter_size=30):
     num_imgs = len(cos_maps) + 1 if cos_maps is not None else 2
@@ -85,9 +99,10 @@ def plot_img_pairs(imglist, src_points, trg_points, trg_mask, cos_maps=None, sav
     plt.close()
 
 
-def nearest_distance_to_mask_contour(mask, x, y):
+def nearest_distance_to_mask_contour(mask, x, y, mask_threshold):
     # Convert the boolean mask to an 8-bit image
-    mask_8bit = (mask.astype(np.uint8) * 255)
+     
+    mask_8bit = ((mask > mask_threshold).astype(np.uint8) * 255)
     
     # Find the contours in the mask
     contours, _ = cv2.findContours(mask_8bit, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -98,7 +113,7 @@ def nearest_distance_to_mask_contour(mask, x, y):
         if cv2.pointPolygonTest(contour, (x, y), False) == 1:  # Inside contour
             num += 1
     if num % 2 == 1:
-        return 0
+        return 0, np.array(mask)[int(y), int(x)]
     
     # If point is outside all contours, find the minimum distance between the point and each contour
     min_distance = float('inf')
@@ -109,18 +124,17 @@ def nearest_distance_to_mask_contour(mask, x, y):
 
     # normalize the distance with the diagonal length of the mask
     diag_len = np.sqrt(mask.shape[0]**2 + mask.shape[1]**2)
-    return abs(min_distance) / diag_len
+    return abs(min_distance) / diag_len, np.array(mask)[int(y), int(x)]
 
 
-def dataset_walkthrough(base_dir, method, model, exp_name, cor_cfg={}, average_pts=True, visualize=False):
+def dataset_walkthrough(base_dir, method, model, exp_name, cor_cfg={}, average_pts=True, visualize=False, mask_threshold=120):
     eval_pairs = 0
-    total_dists = {}
+    total_dists, nss_values = {}, {}
     gt_dir = os.path.join(base_dir, 'GT')
     base_dir = os.path.join(base_dir, 'egocentric')
     
-    for action in os.listdir(base_dir):
-        for trg_object in os.listdir(os.path.join(base_dir, action)):
-            eval_pairs += len(os.listdir(os.path.join(base_dir, action, trg_object)))
+    for trg_object in os.listdir(base_dir):
+        eval_pairs += len(os.listdir(os.path.join(base_dir, trg_object)))
     print(f'Start evaluating {eval_pairs} correspondance pairs...')
     
     cor_cfg['device'] = 'cuda'
@@ -128,55 +142,54 @@ def dataset_walkthrough(base_dir, method, model, exp_name, cor_cfg={}, average_p
 
     pbar = tqdm(total=eval_pairs)
     
-    for action in os.listdir(base_dir):
-        action_path = os.path.join(base_dir, action)
-        total_dists[action] = {}
-        for trg_object in os.listdir(action_path):
-            object_path = os.path.join(action_path, trg_object)
-            total_dists[action][trg_object] = []
-            for instance in os.listdir(object_path):
-                instance_path = os.path.join(object_path, instance)
-                for file in os.listdir(instance_path):
-                    if file.endswith('.jpg'):
-                        trg_image = os.path.join(instance_path, file)
-                        mask_file = os.path.join(gt_dir, action, trg_object, file.replace('jpg', 'png'))
-                        with Image.open(mask_file) as img:
-                            trg_mask = np.array(img) > 122
-                    elif file.endswith('.txt'):
-                        src_image = os.path.join(instance_path, file).replace('txt', 'png')
-                        src_object = file.split('_')[0]
-                        with open(os.path.join(instance_path, file), 'r') as f:
-                            lines = f.readlines()
-                            src_points = [list(map(float, line.rstrip().split(','))) for line in lines if re.match(r'^\d+.\d+,.*\d+.\d+$', line.rstrip())]
-                            if average_pts:
-                                src_points = [np.mean(np.array(src_points), axis=0).astype(np.int32)]
-                pbar.set_description(f'{action}-{trg_object}-{instance}')
-                prompts = [f'a photo of a {src_object}', f'a photo of {trg_object}']
-                trg_points, cor_maps = get_cor_pairs(method, model, src_image, trg_image, src_points, prompts[0], prompts[1], cor_cfg)
-                trg_point = np.mean(trg_points, axis=0)
-                trg_dist = nearest_distance_to_mask_contour(trg_mask, trg_point[0], trg_point[1])
-                total_dists[action][trg_object].append(trg_dist)
-                # print(trg_point, trg_dist)
-                if visualize:
-                    res_dir = f'results/{exp_name}/{action}/{trg_object}' if method == 'dift' else f'results/baselines/{method}/{exp_name}/{action}/{trg_object}'
-                    imglist = [Image.open(file).convert('RGB') for file in [src_image, trg_image]]
-                    os.makedirs(res_dir, exist_ok=True)
-                    plot_img_pairs(imglist, src_points, trg_points, trg_mask, cor_maps, os.path.join(res_dir, f'{instance}_{trg_dist:.2f}.png'))
-                pbar.update(1)
+    for trg_object in os.listdir(base_dir):
+        object_path = os.path.join(base_dir, trg_object)
+        total_dists[trg_object], nss_values[trg_object] = [], []
+        for instance in os.listdir(object_path):
+            instance_path = os.path.join(object_path, instance)
+            for file in os.listdir(instance_path):
+                if file.endswith('.jpg'):
+                    trg_image = os.path.join(instance_path, file)
+                    mask_file = os.path.join(gt_dir, trg_object, file.replace('jpg', 'png'))
+                    with Image.open(mask_file) as img:
+                        try:
+                            trg_mask = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+                        except:
+                            trg_mask = np.array(img)
+                elif file.endswith('.txt'):
+                    src_image = os.path.join(instance_path, file).replace('txt', 'png')
+                    src_object = file.split('_')[0]
+                    with open(os.path.join(instance_path, file), 'r') as f:
+                        lines = f.readlines()
+                        src_points = [list(map(float, line.rstrip().split(','))) for line in lines if re.match(r'^\d+.\d+,.*\d+.\d+$', line.rstrip())]
+                        if average_pts:
+                            src_points = [np.mean(np.array(src_points), axis=0).astype(np.int32)]
+            pbar.set_description(f'{trg_object}-{instance}')
+            prompts = [f'a photo of a {src_object}', f'a photo of {trg_object}']
+            trg_points, cor_maps = get_cor_pairs(method, model, src_image, trg_image, src_points, prompts[0], prompts[1], cor_cfg)
+            trg_point = np.mean(trg_points, axis=0)
+            trg_dist, nss_value = nearest_distance_to_mask_contour(trg_mask, trg_point[0], trg_point[1], mask_threshold)
+            total_dists[trg_object].append(trg_dist)
+            nss_values[trg_object].append(nss_value)
+            # print(trg_point, trg_dist)
+            if visualize:
+                res_dir =  f'results/{method}/{exp_name}/{trg_object}'
+                shutil.rmtree(res_dir, ignore_errors=True)
+                imglist = [Image.open(file).convert('RGB') for file in [src_image, trg_image]]
+                os.makedirs(res_dir, exist_ok=True)
+                plot_img_pairs(imglist, src_points, trg_points, trg_mask, cor_maps, os.path.join(res_dir, f'{instance}_{trg_dist:.2f}_{nss_value}.png'))
+            pbar.update(1)
     pbar.close()
-    return total_dists
+    return total_dists, nss_values
 
 
-def analyze_dists(total_dists, dump_name=None):
-    all_dists, lines = [], []
-    for action in total_dists:
-        action_dists = []
-        for trg_object in total_dists[action]:
-            all_dists += total_dists[action][trg_object]
-            action_dists += total_dists[action][trg_object]
-            lines.append(f'{trg_object.split("_")[0]:12s}: dist mean:{np.array(total_dists[action][trg_object]).mean():.3f}, success rate: {(np.array(total_dists[action][trg_object]) == 0).sum() / len(total_dists[action][trg_object]):.3f} ({(np.array(total_dists[action][trg_object]) == 0).sum()}/{len(total_dists[action][trg_object])})')
-        lines.append(f'==={action.split("_")[0].upper().center(6)}===: dist mean:{np.mean(action_dists):.3f}, success rate: {(np.array(action_dists)==0).sum() / len(action_dists):.3f} ({(np.array(action_dists)==0).sum()}/{len(action_dists)})')
-    lines.append(f'=== ALL  ===: dist mean:{np.mean(all_dists):.3f}, success rate: {(np.array(all_dists)==0).sum() / len(all_dists):.3f} ({(np.array(all_dists)==0).sum()}/{len(all_dists)})')
+def analyze_dists(total_dists, nss_values, dump_name=None):
+    all_dists, all_nss, lines = [], [], []
+    for trg_object in total_dists.keys():
+        all_dists += total_dists[trg_object]
+        all_nss += nss_values[trg_object]
+        lines.append(f'{trg_object.split("_")[0]:12s}: dist mean:{np.array(total_dists[trg_object]).mean():.3f}, nss mean: {np.array(nss_values[trg_object]).mean():.1f}, success rate: {(np.array(total_dists[trg_object]) == 0).sum() / len(total_dists[trg_object]):.3f} ({(np.array(total_dists[trg_object]) == 0).sum()}/{len(total_dists[trg_object])})')
+    lines.append(f'=== ALL  ===: dist mean:{np.mean(all_dists):.3f}, nss mean: {np.array(all_nss).mean():.1f}, success rate: {(np.array(all_dists)==0).sum() / len(all_dists):.3f} ({(np.array(all_dists)==0).sum()}/{len(all_dists)})')
     if dump_name is not None:
         with open(dump_name, 'w') as f:
             f.writelines([line + '\n' for line in lines])
@@ -184,20 +197,26 @@ def analyze_dists(total_dists, dump_name=None):
         print(line)
 
 if __name__ == '__main__':
-    method = 'sd_dino'
-    exp_name = 'secr_avg_pts'
-    average_pts, visualize = True, False
-    
-    cor_cfg = get_cor_cfg(method)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--method', '-m', type=str, default='dift')
+    parser.add_argument('--dataset', '-d', type=str, default='clip_b32_crop')
+    parser.add_argument('--exp_name', '-e', type=str, default='')
+    parser.add_argument('--mask_threshold', '-t', type=int, default=120)
+    parser.add_argument('--visualize', '-v', action='store_true')
+    parser.add_argument('--avg_pts', '-a', action='store_true')
+    args = parser.parse_args()
+    average_pts, visualize = args.avg_pts, args.visualize
+    exp_name = args.dataset + '_' + str(args.mask_threshold) if len(args.exp_name) == 0 else args.exp_name  + '_' + str(args.mask_threshold)
+    cor_cfg = get_cor_cfg(args.method)
     # set_global_logging_level(logging.ERROR)
-    model = get_model(method, cor_cfg, device='cuda')
-    base_dir = 'eval_secr'
-    res_dir = f'results/{exp_name}' if method == 'dift' else f'results/baselines/{method}/{exp_name}'
+    model = get_model(args.method, cor_cfg, device='cuda')
+    base_dir = f'datasets/{args.dataset}'
+    res_dir = f'results/{args.method}/{exp_name}'
     # with open(f'os.path.join(res_dir, 'total_dists.pkl'), 'rb') as f:
     #     total_dists = pickle.load(f)
     
-    total_dists = dataset_walkthrough(base_dir, method, model, exp_name, cor_cfg, average_pts, visualize)
-    with open(os.path.join(res_dir, 'total_dists.pkl'), 'wb') as f:
-        pickle.dump(total_dists, f)
-    
-    analyze_dists(total_dists, os.path.join(res_dir, 'total_dists.txt'))
+    total_dists, nss_values = dataset_walkthrough(base_dir, args.method, model, exp_name, cor_cfg, average_pts, visualize, args.mask_threshold)
+    with open(os.path.join(res_dir, 'results.pkl'), 'wb') as f:
+        pickle.dump({'total_dists': total_dists, 'nss_values': nss_values}, f)
+
+    analyze_dists(total_dists, nss_values, os.path.join(res_dir, 'total_dists.txt'))
