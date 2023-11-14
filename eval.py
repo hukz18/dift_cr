@@ -26,7 +26,7 @@ def get_cor_cfg(method):
     elif method == 'sd_dino':
         cor_cfg['model_type'] = 'dinov2_vitb14'
     elif method == 'dino_vit':
-        cor_cfg['img_size'] = 224
+        cor_cfg['img_size'] = 256
         cor_cfg['model_type'] = 'dino_vits8'
         cor_cfg['stride'] = 4
     return cor_cfg
@@ -76,28 +76,29 @@ def plot_img_pairs(imglist, src_points_list, trg_points_list, trg_mask, cos_map_
     plt.tight_layout()
 
     for i in range(src_images):
-        axes[i, 0].imshow(imglist[i])
-        axes[i, 0].axis('off')
-        axes[i, 0].set_title('source')
+        ax = axes[i] if src_images > 1 else axes
+        ax[0].imshow(imglist[i])
+        ax[0].axis('off')
+        ax[0].set_title('source')
         for x, y in src_points_list[i]:
             x, y = int(np.round(x)), int(np.round(y))
-            axes[i, 0].scatter(x, y, s=scatter_size)
+            ax[0].scatter(x, y, s=scatter_size)
 
         for j in range(1, num_imgs):
-            axes[i, j].imshow(imglist[-1])
+            ax[j].imshow(imglist[-1])
             if cos_map_list[0] is not None:
                 heatmap = cos_map_list[i][j - 1][0]
                 heatmap = (heatmap - np.min(heatmap)) / (np.max(heatmap) - np.min(heatmap))  # Normalize to [0, 1]
-                axes[i, j].imshow(255 * heatmap, alpha=alpha, cmap='viridis')
-            axes[i, j].axis('off')
-            axes[i, j].scatter(trg_points_list[i][j - 1][0], trg_points_list[i][j - 1][1], c='C%d' % (j - 1), s=scatter_size)
-            axes[i, j].set_title('target')
+                ax[j].imshow(255 * heatmap, alpha=alpha, cmap='viridis')
+            ax[j].axis('off')
+            ax[j].scatter(trg_points_list[i][j - 1][0], trg_points_list[i][j - 1][1], c='C%d' % (j - 1), s=scatter_size)
+            ax[j].set_title('target')
         
-        axes[i, -1].imshow(trg_mask, cmap='gray')
-        axes[i, -1].axis('off')
-        axes[i, -1].set_title('target mask')
+        ax[-1].imshow(trg_mask, cmap='gray')
+        ax[-1].axis('off')
+        ax[-1].set_title('target mask')
         trg_point = np.mean(trg_points_list[i], axis=0)
-        axes[i, -1].scatter(trg_point[0], trg_point[1], c='C%d' % (j - 1), s=scatter_size)
+        ax[-1].scatter(trg_point[0], trg_point[1], c='C%d' % (j - 1), s=scatter_size)
     plt.plot()
     plt.savefig(save_name)
     plt.close()
@@ -145,7 +146,8 @@ def dataset_walkthrough(base_dir, method, model, exp_name, cor_cfg={}, average_p
     cor_cfg['visualize'] = visualize
 
     pbar = tqdm(total=eval_pairs)
-    
+    if visualize:
+        shutil.rmtree(f'results/{method}/{exp_name}', ignore_errors=True)
     for trg_object in os.listdir(base_dir):
         object_path = os.path.join(base_dir, trg_object)
         total_dists[trg_object], nss_values[trg_object] = [], []
@@ -183,7 +185,6 @@ def dataset_walkthrough(base_dir, method, model, exp_name, cor_cfg={}, average_p
             # print(trg_point, trg_dist)ipy
             if visualize:
                 res_dir =  f'results/{method}/{exp_name}/{trg_object}'
-                shutil.rmtree(res_dir, ignore_errors=True)
                 imglist = [Image.open(file).convert('RGB') for file in [*src_images, trg_image]]
                 os.makedirs(res_dir, exist_ok=True)
                 plot_img_pairs(imglist, src_points_list, trg_points_list, trg_mask, cor_map_list, os.path.join(res_dir, f'{instance}_{trg_dist:.2f}_{nss_value}.png'))
@@ -208,15 +209,14 @@ def analyze_dists(total_dists, nss_values, dump_name=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--method', '-m', type=str, default='dift')
-    parser.add_argument('--dataset', '-d', type=str, default='clip_b32_crop_5')
+    parser.add_argument('--dataset', '-d', type=str, default='clip_b32_crop')
     parser.add_argument('--exp_name', '-e', type=str, default='')
-    parser.add_argument('--mask_threshold', '-t', type=int, default=60)
+    parser.add_argument('--mask_threshold', '-s', type=int, default=60)
     parser.add_argument('--visualize', '-v', action='store_true')
     parser.add_argument('--avg_pts', '-a', action='store_true')
-    parser.add_argument('--top_k', '-k', type=int, default=3)
+    parser.add_argument('--top_k', '-k', type=int, default=1)
     args = parser.parse_args()
     average_pts, visualize = args.avg_pts, args.visualize
-    visualize = True
     exp_name = args.dataset if len(args.exp_name) == 0 else args.exp_name
     if args.mask_threshold != 60:
         exp_name += '_s' + str(args.mask_threshold)
